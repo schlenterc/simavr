@@ -258,7 +258,7 @@ avr_load_firmware(
 			do_chunk(chunk, avr->flash, avr->flashend + 1, &avr->codeend);
 			break;
 		case DATA:
-			do_chunk(chunk, avr->data + avr->ioend, avr->ramend + 1 - avr->ioend,
+			do_chunk(chunk, avr->data + avr->ioend + 1, avr->ramend - avr->ioend,
 					 NULL);
 			break;
 		case EEPROM:
