@@ -130,7 +130,7 @@ LDFLAGS 	+= -L${LIBDIR} -lsimavr -lm
 C_LIBELF	:= ${shell pkg-config --cflags \
 			libelf 2>/dev/null && \
 			echo -DHAVE_LIBELF=1 }
-LD_LIBELF	:= ${shell pkg-config --libs libelf }
+LD_LIBELF	:= ${shell pkg-config --libs libelf 2>/dev/null }
 # Hmmm silly libdwarf doesn't have a .pc file! Its 2023 guys...
 C_LIBDWARF	:= ${shell ls /usr/include/libdwarf/libdwarf.h >/dev/null 2>&1 && \
 			echo -DHAVE_LIBDWARF=1 }
