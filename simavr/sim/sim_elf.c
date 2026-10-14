@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <libgen.h>
 #include <string.h>
 #include <errno.h>
@@ -422,7 +423,45 @@ avr_load_firmware(
 	free(firmware->file_name);
 }
 
-#ifdef HAVE_LIBELF
+static void
+elf_parse_deviceinfo_section(
+	elf_firmware_t * firmware,
+	const uint8_t * src,
+	uint32_t size)
+{
+	if (!firmware || !src || size <= 12 || firmware->mmcu[0] != '\0')
+		return;
+
+	uint32_t namesz = src[0] | (src[1] << 8) | (src[2] << 16) | (src[3] << 24);
+	uint32_t descsz = src[4] | (src[5] << 8) | (src[6] << 16) | (src[7] << 24);
+	uint32_t type   = src[8] | (src[9] << 8) | (src[10] << 16) | (src[11] << 24);
+	uint32_t namesz_aligned = (namesz + 3) & ~3;
+	uint32_t desc_offset = 12 + namesz_aligned;
+
+	if (type != 1 || desc_offset + descsz > size || descsz <= 12)
+		return;
+
+	const char *desc = (const char *)src + desc_offset;
+	for (uint32_t k = 0; k + 2 < descsz; k++) {
+		if (!strncmp(desc + k, "atmega", 6) ||
+		    !strncmp(desc + k, "attiny", 6) ||
+		    !strncmp(desc + k, "at90", 4) ||
+		    !strncmp(desc + k, "atxmega", 7) ||
+		    (!strncmp(desc + k, "at", 2) && isalnum((unsigned char)desc[k + 2]))) {
+			uint32_t len = 0;
+			while (k + len < descsz && desc[k + len] &&
+			       (isalnum((unsigned char)desc[k + len]) || desc[k + len] == '_')) {
+				len++;
+			}
+			if (len >= 3 && len < sizeof(firmware->mmcu)) {
+				strncpy(firmware->mmcu, desc + k, len);
+				firmware->mmcu[len] = '\0';
+				break;
+			}
+		}
+	}
+}
+
 static void
 elf_parse_mmcu_section(
 		elf_firmware_t * firmware,
@@ -527,6 +566,8 @@ elf_parse_mmcu_section(
 		src += next - 2; // already incremented
 	}
 }
+
+#ifdef HAVE_LIBELF
 
 #if 0
 static int
@@ -699,6 +740,11 @@ elf_read_firmware(
 						shdr.sh_addr);
 		//	printf("%s: size %ld\n", __FUNCTION__, s->d_size);
 		//	avr->frequency = f_cpu;
+		} else if (name && !strcmp(name, ".note.gnu.avr.deviceinfo")) {
+			Elf_Data *s = elf_getdata(scn, NULL);
+
+			if (s && s->d_buf)
+				elf_parse_deviceinfo_section(firmware, s->d_buf, s->d_size);
 		}
 
 #if ELF_SYMBOLS
@@ -800,12 +846,206 @@ elf_read_firmware(
 
 	return 0;
 }
-#else //  HAVE_LIBELF not defined.
+#else //  HAVE_LIBELF not defined - fallback using standard <elf.h>
+#include <elf.h>
+
 int
 elf_read_firmware(const char * file, elf_firmware_t * firmware)
 {
-	AVR_LOG(NULL, LOG_ERROR, "ELF format is not supported by this build.\n");
-	return -1;
+	Elf32_Ehdr   elf_header;
+	Elf32_Phdr  *php = NULL;
+	Elf32_Shdr  *shdr = NULL;
+	fw_chunk_t **ncp;
+	int          fd;
+
+	if ((fd = open(file, O_RDONLY | O_BINARY)) == -1 ||
+			(read(fd, &elf_header, sizeof(elf_header))) < (ssize_t)sizeof(elf_header)) {
+		AVR_LOG(NULL, LOG_ERROR, "could not read %s\n", file);
+		perror(file);
+		if (fd != -1)
+			close(fd);
+		return -1;
+	}
+
+	if (memcmp(elf_header.e_ident, ELFMAG, SELFMAG) != 0 ||
+	    elf_header.e_ident[EI_CLASS] != ELFCLASS32) {
+		AVR_LOG(NULL, LOG_ERROR, "Unexpected ELF file type\n");
+		close(fd);
+		return -1;
+	}
+
+	/* Scan Program Header Table */
+	if (elf_header.e_phnum == 0 || elf_header.e_phentsize < sizeof(Elf32_Phdr)) {
+		AVR_LOG(NULL, LOG_ERROR, "No ELF Program Headers\n");
+		close(fd);
+		return -1;
+	}
+
+	php = calloc(elf_header.e_phnum, sizeof(Elf32_Phdr));
+	if (!php) {
+		close(fd);
+		return -1;
+	}
+
+	if (lseek(fd, elf_header.e_phoff, SEEK_SET) < 0 ||
+	    read(fd, php, elf_header.e_phnum * sizeof(Elf32_Phdr)) < (ssize_t)(elf_header.e_phnum * sizeof(Elf32_Phdr))) {
+		AVR_LOG(NULL, LOG_ERROR, "Error reading ELF program headers\n");
+		free(php);
+		close(fd);
+		return -1;
+	}
+
+	ncp = &firmware->chunks;
+	for (int i = 0; i < elf_header.e_phnum; i++) {
+		Elf32_Phdr *ph = &php[i];
+		if (ph->p_type != PT_LOAD || ph->p_filesz == 0)
+			continue;
+		if (ph->p_paddr >= AVR_SEGMENT_OFFSET_LAST)
+			continue;
+
+		fw_chunk_t *chunk = (fw_chunk_t *)malloc(sizeof(fw_chunk_t) + ph->p_filesz);
+		if (!chunk) {
+			AVR_LOG(NULL, LOG_ERROR, "No memory for firmware!\n");
+			free(php);
+			close(fd);
+			exit(1);
+		}
+		chunk->type = UNKNOWN;
+		chunk->addr = ph->p_paddr;
+		chunk->size = ph->p_filesz;
+		chunk->fill_size = ph->p_memsz;
+		chunk->next = NULL;
+
+		if (lseek(fd, ph->p_offset, SEEK_SET) < 0 ||
+		    read(fd, chunk->data, ph->p_filesz) < (ssize_t)ph->p_filesz) {
+			AVR_LOG(NULL, LOG_ERROR, "Error reading segment data\n");
+			free(chunk);
+			free(php);
+			close(fd);
+			return -1;
+		}
+		*ncp = chunk;
+		ncp = &chunk->next;
+	}
+	free(php);
+
+	/* Scan section headers for .mmcu, .note.gnu.avr.deviceinfo, and symbol table */
+	if (!firmware->dwarf_file)
+		firmware->dwarf_file = strdup(file);
+
+	if (elf_header.e_shnum > 0 && elf_header.e_shentsize >= sizeof(Elf32_Shdr)) {
+		shdr = calloc(elf_header.e_shnum, sizeof(Elf32_Shdr));
+		if (shdr && lseek(fd, elf_header.e_shoff, SEEK_SET) >= 0 &&
+		    read(fd, shdr, elf_header.e_shnum * sizeof(Elf32_Shdr)) == (ssize_t)(elf_header.e_shnum * sizeof(Elf32_Shdr))) {
+
+			char *shstrtab = NULL;
+			if (elf_header.e_shstrndx < elf_header.e_shnum && shdr[elf_header.e_shstrndx].sh_size > 0) {
+				shstrtab = malloc(shdr[elf_header.e_shstrndx].sh_size);
+				if (shstrtab) {
+					if (lseek(fd, shdr[elf_header.e_shstrndx].sh_offset, SEEK_SET) < 0 ||
+					    read(fd, shstrtab, shdr[elf_header.e_shstrndx].sh_size) < (ssize_t)shdr[elf_header.e_shstrndx].sh_size) {
+						free(shstrtab);
+						shstrtab = NULL;
+					}
+				}
+			}
+
+			for (int i = 0; i < elf_header.e_shnum; i++) {
+				const char *name = NULL;
+				if (shstrtab && shdr[i].sh_name < shdr[elf_header.e_shstrndx].sh_size)
+					name = shstrtab + shdr[i].sh_name;
+
+				if (name && !strcmp(name, ".mmcu")) {
+					uint8_t *sdata = malloc(shdr[i].sh_size);
+					if (sdata && lseek(fd, shdr[i].sh_offset, SEEK_SET) >= 0 &&
+					    read(fd, sdata, shdr[i].sh_size) == (ssize_t)shdr[i].sh_size) {
+						elf_parse_mmcu_section(firmware, sdata, shdr[i].sh_size);
+					}
+					free(sdata);
+				} else if (name && !strcmp(name, ".note.gnu.avr.deviceinfo")) {
+					uint8_t *sdata = malloc(shdr[i].sh_size);
+					if (sdata && lseek(fd, shdr[i].sh_offset, SEEK_SET) >= 0 &&
+					    read(fd, sdata, shdr[i].sh_size) == (ssize_t)shdr[i].sh_size) {
+						elf_parse_deviceinfo_section(firmware, sdata, shdr[i].sh_size);
+					}
+					free(sdata);
+				} else if (shdr[i].sh_type == SHT_SYMTAB) {
+					if (shdr[i].sh_link < elf_header.e_shnum && shdr[i].sh_entsize >= sizeof(Elf32_Sym)) {
+						uint32_t sym_count = shdr[i].sh_size / shdr[i].sh_entsize;
+						Elf32_Sym *syms = malloc(shdr[i].sh_size);
+						char *strtab = malloc(shdr[shdr[i].sh_link].sh_size);
+
+						if (syms && strtab &&
+						    lseek(fd, shdr[i].sh_offset, SEEK_SET) >= 0 &&
+						    read(fd, syms, shdr[i].sh_size) == (ssize_t)shdr[i].sh_size &&
+						    lseek(fd, shdr[shdr[i].sh_link].sh_offset, SEEK_SET) >= 0 &&
+						    read(fd, strtab, shdr[shdr[i].sh_link].sh_size) == (ssize_t)shdr[shdr[i].sh_link].sh_size) {
+
+							uint32_t highest_data = 0;
+							for (uint32_t si = 0; si < sym_count; si++) {
+								Elf32_Sym *sym = &syms[si];
+								uint8_t bind = ELF32_ST_BIND(sym->st_info);
+								uint8_t type = ELF32_ST_TYPE(sym->st_info);
+
+								if (bind == STB_GLOBAL || type == STT_FUNC || type == STT_OBJECT) {
+									if (sym->st_name < shdr[shdr[i].sh_link].sh_size) {
+										const char *sname = strtab + sym->st_name;
+										if (type == STT_NOTYPE && sym->st_size == 0) {
+											int n = strlen(sname);
+											if (n > 9 && !strcmp(&sname[n - 9], "_LENGTH__"))
+												continue;
+										}
+										if (sym->st_value > AVR_SEGMENT_OFFSET_DATA + highest_data &&
+										    sym->st_value < AVR_SEGMENT_OFFSET_EEPROM) {
+											highest_data = sym->st_value + sym->st_size - AVR_SEGMENT_OFFSET_DATA;
+										}
+										if (!strcmp(sname, "__vectors"))
+											firmware->flashbase = sym->st_value;
+
+										avr_symbol_t *s = malloc(sizeof(avr_symbol_t) + strlen(sname) + 1);
+										strcpy((char *)s->symbol, sname);
+										s->addr = sym->st_value;
+										s->size = sym->st_size;
+
+										if (!(firmware->symbolcount % 8))
+											firmware->symbol = realloc(firmware->symbol, (firmware->symbolcount + 8) * sizeof(firmware->symbol[0]));
+
+										int insert = -1;
+										for (uint32_t idx = 0; idx < firmware->symbolcount && insert == -1; idx++) {
+											if (firmware->symbol[idx]->addr >= s->addr)
+												insert = idx;
+										}
+										if (insert == -1)
+											insert = firmware->symbolcount;
+										else
+											memmove(firmware->symbol + insert + 1,
+												firmware->symbol + insert,
+												(firmware->symbolcount - insert) * sizeof(firmware->symbol[0]));
+										firmware->symbol[insert] = s;
+										firmware->symbolcount++;
+									}
+								}
+							}
+							firmware->highest_data_symbol = highest_data;
+						}
+						free(syms);
+						free(strtab);
+					}
+				}
+			}
+			free(shstrtab);
+		}
+		free(shdr);
+	}
+
+	close(fd);
+
+	if (!firmware->file_name)
+		firmware->file_name = strdup(file);
+
+	sim_default_mcu(firmware, file);
+
+	return 0;
 }
 #endif
 
