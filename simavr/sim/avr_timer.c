@@ -293,6 +293,21 @@ avr_timer_irq_ext_clock(
 
 }
 
+static inline int
+_avr_timer_comp_is_active(avr_timer_t *p, int compi)
+{
+	avr_t * avr = p->io.avr;
+	if (avr_regbit_get(avr, p->comp[compi].interrupt.enable))
+		return 1;
+	if (p->comp[compi].com_pin.reg && avr_regbit_get(avr, p->comp[compi].com) != avr_timer_com_normal)
+		return 1;
+	if (p->wgm_op_mode_kind == avr_timer_wgm_ctc)
+		return 1;
+	if (p->mode.top == avr_timer_wgm_reg_ocra && compi == 0)
+		return 1;
+	return 0;
+}
+
 // timer overflow
 static avr_cycle_count_t
 avr_timer_tov(
@@ -324,7 +339,7 @@ avr_timer_tov(
 		{ avr_timer_compa, avr_timer_compb, avr_timer_compc };
 
 	for (int compi = 0; compi < AVR_TIMER_COMP_COUNT; compi++) {
-		if (p->comp[compi].comp_cycles) {
+		if (p->comp[compi].comp_cycles && _avr_timer_comp_is_active(p, compi)) {
 			if (p->comp[compi].comp_cycles < p->tov_cycles && p->comp[compi].comp_cycles >= (avr->cycle - when)) {
 				avr_timer_comp_on_tov(p, when, compi);
 				avr_cycle_timer_register(avr,
@@ -700,6 +715,20 @@ avr_timer_write(
 
 		p->ext_clock_flags &= ~(AVR_TIMER_EXTCLK_FLAG_TN | AVR_TIMER_EXTCLK_FLAG_EDGE
 								| AVR_TIMER_EXTCLK_FLAG_AS2 | AVR_TIMER_EXTCLK_FLAG_STARTED);
+		if (new_as2) {
+			p->ext_clock_flags |= AVR_TIMER_EXTCLK_FLAG_AS2 | AVR_TIMER_EXTCLK_FLAG_EDGE;
+		}
+
+		if (new_cs == 0) {
+			p->cs_div_value = 0;		// reset prescaler
+			// cancel everything
+			avr_timer_cancel_all_cycle_timers(avr, p, 1);
+
+			AVR_LOG(avr, LOG_TRACE, "TIMER: %s-%c clock turned off\n",
+					__func__, p->name);
+			return;
+		}
+
 		if (p->ext_clock_pin.reg
 				&& (p->cs_div[new_cs] == AVR_TIMER_EXTCLK_CHOOSE)) {
 			// Special case: external clock source chosen, prescale divider irrelevant.
@@ -707,10 +736,6 @@ avr_timer_write(
 			p->ext_clock_flags |= AVR_TIMER_EXTCLK_FLAG_TN | (new_cs & AVR_TIMER_EXTCLK_FLAG_EDGE);
 		} else {
 			p->cs_div_value = 1 << p->cs_div[new_cs];
-			if (new_as2) {
-				//p->cs_div_value = (uint32_t)((uint64_t)avr->frequency * (1 << p->cs_div[new_cs]) / 32768);
-				p->ext_clock_flags |= AVR_TIMER_EXTCLK_FLAG_AS2 | AVR_TIMER_EXTCLK_FLAG_EDGE;
-			}
 		}
 
 	/* mode */
