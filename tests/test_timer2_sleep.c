@@ -41,21 +41,28 @@ int main(int argc, char **argv) {
 	// Enable AS2 mode on Timer2 (32kHz watch crystal)
 	write_io_reg(avr, p->as2.reg, 1 << p->as2.bit);
 
-	// Set prescaler 1 (CS20 = 1 in TCCR2B, data address 0xb1)
-	write_io_reg(avr, 0xb1, 0x01);
+	// Set OCR2A = 95
+	write_io_reg(avr, p->comp[AVR_TIMER_COMPA].r_ocr, 95);
 
-	// Enable Timer2 Overflow Interrupt ONLY (TOIE2 = 1 in TIMSK2, data address 0x70)
-	// Compare match interrupts (OCIE2A, OCIE2B) are left disabled (0)
-	write_io_reg(avr, 0x70, 0x01);
+	// Enable Timer2 Compare Match A Interrupt (OCIE2A = 1 in TIMSK2, data address 0x70)
+	write_io_reg(avr, 0x70, 1 << p->comp[AVR_TIMER_COMPA].interrupt.enable.bit);
+
+	// Set prescaler 1024 (CS22=1, CS21=1, CS20=1 in TCCR2B, data address 0xb1)
+	write_io_reg(avr, 0xb1, 0x07);
 
 	// Enable global interrupts (S_I bit)
 	avr->sreg[S_I] = 1;
 
-	// Execute SLEEP instruction (opcode 0x9588)
+	// Flash program: SLEEP instruction (0x9588) followed by NOP
 	avr->flash[0] = 0x88;
 	avr->flash[1] = 0x95;
+	avr->flash[2] = 0x00;
+	avr->flash[3] = 0x00;
 	avr->pc = 0;
 
+	avr_cycle_count_t timer_start_cycle = avr->cycle;
+
+	// Execute SLEEP instruction
 	avr_run_one(avr);
 
 	// CPU should now be sleeping
@@ -63,19 +70,22 @@ int main(int argc, char **argv) {
 		fail("Expected CPU state cpu_Sleeping (%d), got %d", cpu_Sleeping, avr->state);
 	}
 
-	// Before overflow occurs, no interrupt is pending yet
-	if (avr_has_pending_interrupts(avr)) {
-		fail("avr_has_pending_interrupts returned non-zero before overflow");
-	}
-
-	// Calculate predicted sleep cycle count
+	// Calculate predicted sleep cycle count via avr_cycle_timer_process
 	avr_cycle_count_t sleep_cycles = avr_cycle_timer_process(avr);
 
-	// Since compare interrupts are disabled and OCR is 0, sleep_cycles should equal
-	// p->tov_cycles (255 or 256 cycles until TOV2), NOT 1 cycle!
-	if (sleep_cycles < 255) {
-		fail("avr_cycle_timer_process returned premature sleep count %llu (expected >= 255)",
-			(unsigned long long)sleep_cycles);
+	// Run single step (avr_callback_run_raw) when cpu_Sleeping to advance cycles by sleep duration and trigger interrupt
+	avr_callback_run_raw(avr);
+
+	avr_cycle_count_t total_elapsed_cycles = avr->cycle - timer_start_cycle;
+	double elapsed_seconds = (double)total_elapsed_cycles / avr->frequency;
+
+	printf("Sleep time cycles predicted by timer process: %llu\n", (unsigned long long)sleep_cycles);
+	printf("Total elapsed cycles from timer enable to wakeup: %llu\n", (unsigned long long)total_elapsed_cycles);
+	printf("Elapsed seconds: %.4f s\n", elapsed_seconds);
+
+	// Timer configured for prescaler 1024 and OCR2A = 95 gives (95 + 1) * 1024 = 98304 cycles = 3.0 seconds
+	if (total_elapsed_cycles != 98305) { // 98304 timer cycles + 1 cycle for SLEEP instruction execution = 98305
+		fail("Expected total elapsed cycles = 98305 (~3.0s), got %llu", (unsigned long long)total_elapsed_cycles);
 	}
 
 	tests_success();
