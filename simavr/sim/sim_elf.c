@@ -187,8 +187,7 @@ avr_load_firmware(
                            	  avr->trace_data->data_names_size) {
 			// Address in data space.
 
-			addr -= AVR_SEGMENT_OFFSET_DATA;
-			sp = &avr->data_names[addr];
+			sp = &avr->data_names[addr - AVR_SEGMENT_OFFSET_DATA];
 			elf_set_preferred(sp, new);
 		}
 	}

@@ -37,6 +37,19 @@ int main(int argc, char **argv) {
 
 	fw.chunks = chunk;
 
+#if ELF_SYMBOLS
+	// Test symbols in data space to verify data_names and symbol loading logic
+	avr_symbol_t *sym = malloc(sizeof(avr_symbol_t) + 16);
+	sym->addr = AVR_SEGMENT_OFFSET_DATA + ramstart;
+	sym->size = 2;
+	strcpy((char *)sym->symbol, "test_sym");
+
+	fw.symbol = malloc(sizeof(avr_symbol_t *));
+	fw.symbol[0] = sym;
+	fw.symbolcount = 1;
+	fw.highest_data_symbol = ramstart + 1;
+#endif
+
 	avr_load_firmware(avr, &fw);
 
 	// Verify avr->data pointer is still non-NULL
