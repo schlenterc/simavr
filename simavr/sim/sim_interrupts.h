@@ -36,6 +36,10 @@ enum {
 	AVR_INT_IRQ_COUNT,
 	AVR_INT_ANY		= 0xff,	// for avr_get_interrupt_irq()
 };
+struct avr_t;
+struct avr_int_vector_t;
+typedef int (*avr_int_can_wake_t)(struct avr_t * avr, struct avr_int_vector_t * vector);
+
 // interrupt vector for the IO modules
 typedef struct avr_int_vector_t {
 	uint8_t 		vector;			// vector number, zero (reset) is reserved
@@ -44,6 +48,9 @@ typedef struct avr_int_vector_t {
 
 	uint8_t 		mask; // Mask for PCINTs. this is needed for chips like the 2560 where PCINT do not align with IRQs
 	int8_t 		shift;	// PCINT8 = E0, PCINT9-15 are on J0-J6. Shift shifts down (<0) or up (>0) for alignment with IRQ#.
+
+	avr_int_can_wake_t can_wake;	// optional callback to check if interrupt can wake CPU from sleep
+	void *			param;			// optional context parameter for can_wake / peripheral
 
 	// 'pending' IRQ, and 'running' status as signaled here
 	avr_irq_t		irq[AVR_INT_IRQ_COUNT];

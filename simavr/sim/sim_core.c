@@ -1096,8 +1096,10 @@ run_one_again:
 					 * Without this check, it was possible to incorrectly enter a state
 					 * in which the cpu was sleeping and interrupts were disabled. For more
 					 * details, see the commit message. */
-					if (!avr_has_pending_interrupts(avr) || !avr->sreg[S_I])
+					if (!avr_has_pending_interrupts(avr) || !avr->sreg[S_I]) {
 						avr->state = cpu_Sleeping;
+						avr->sleep_mode = avr_get_sleep_mode(avr);
+					}
 				}	break;
 				case 0x9598: { // BREAK -- 1001 0101 1001 1000
 					STATE("break\n");

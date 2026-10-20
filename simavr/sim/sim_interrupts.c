@@ -134,11 +134,19 @@ avr_raise_interrupt(
         return 0;
 	}
 
-	avr_raise_irq(vector->irq + AVR_INT_IRQ_PENDING, 1);
-	avr_raise_irq(avr->interrupts.irq + AVR_INT_IRQ_PENDING, vector->vector);
-
 	// If the interrupt is enabled, attempt to wake the core
 	if (avr_regbit_get(avr, vector->enable)) {
+		if (avr->state == cpu_Sleeping) {
+			int can_wake = 1;
+			if (vector->can_wake)
+				can_wake = vector->can_wake(avr, vector);
+			if (!can_wake)
+				return 0;
+		}
+
+		avr_raise_irq(vector->irq + AVR_INT_IRQ_PENDING, 1);
+		avr_raise_irq(avr->interrupts.irq + AVR_INT_IRQ_PENDING, vector->vector);
+
 		// Mark the interrupt as pending
 		vector->pending = 1;
 
@@ -234,7 +242,7 @@ void
 avr_service_interrupts(
 		avr_t * avr)
 {
-	if (!avr->sreg[S_I] || !avr->interrupt_state)
+	if (!avr->sreg[S_I] || !avr->interrupt_state || avr->state == cpu_Sleeping)
 		return;
 
 	if (avr->interrupt_state < 0) {

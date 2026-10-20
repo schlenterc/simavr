@@ -382,6 +382,20 @@ avr_pending_sleep_usec(
 	return 0;
 }
 
+uint8_t
+avr_get_sleep_mode(
+		avr_t * avr)
+{
+	if (!avr || !avr->sleep_flags.enable.reg)
+		return 0;
+
+	if (avr_regbit_get(avr, avr->sleep_flags.enable)) {
+		return avr_regbit_get_array(avr, avr->sleep_flags.mode, 3);
+	}
+
+	return 0;
+}
+
 void
 avr_callback_sleep_gdb(
 		avr_t * avr,
