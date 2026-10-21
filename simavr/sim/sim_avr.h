@@ -219,11 +219,16 @@ typedef struct avr_t {
 		avr_regbit_t		borf;
 		avr_regbit_t		wdrf;
 	} reset_flags;
+	struct {
+		avr_regbit_t		enable;
+		avr_regbit_t		mode[3];
+	} sleep_flags;
 
 	// filled by the ELF data, this allow tracking of invalid jumps
 	uint32_t			codeend;
 
 	int					state;		// stopped, running, sleeping
+	uint8_t				sleep_mode;	// decoded MCU sleep mode (0=Idle, 1=ADC, 2=PwrDown, 3=PwrSave, etc.)
 	uint32_t			frequency;	// frequency we are running at
 	// mostly used by the ADC for now
 	uint32_t			vcc,avcc,aref; // (optional) voltages in millivolts
@@ -561,6 +566,10 @@ uint32_t
 avr_pending_sleep_usec(
 		avr_t * avr,
 		avr_cycle_count_t howLong);
+/* Inspect MCU sleep registers (SMCR/MCUCR) and return decoded sleep mode */
+uint8_t
+avr_get_sleep_mode(
+		avr_t * avr );
 /* Return the number of 'real time' spent since sim started, in uS */
 uint64_t
 avr_get_time_stamp(

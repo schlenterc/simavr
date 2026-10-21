@@ -77,6 +77,31 @@
 # define MCU_STATUS_REG MCUSR
 #endif
 
+#ifdef SMCR
+# define MCU_SLEEP_REG SMCR
+#elif defined(MCUCR)
+# define MCU_SLEEP_REG MCUCR
+#endif
+
+#ifdef SM2
+# define _SM2_REGBIT AVR_IO_REGBIT(MCU_SLEEP_REG, SM2)
+#else
+# define _SM2_REGBIT {0}
+#endif
+
+#if defined(MCU_SLEEP_REG) && defined(SE) && defined(SM0)
+# define _SLEEP_FLAGS_HELPER , .sleep_flags = { \
+		.enable = AVR_IO_REGBIT(MCU_SLEEP_REG, SE), \
+		.mode = { \
+			AVR_IO_REGBIT(MCU_SLEEP_REG, SM0), \
+			AVR_IO_REGBIT(MCU_SLEEP_REG, SM1), \
+			_SM2_REGBIT \
+		} \
+	}
+#else
+# define _SLEEP_FLAGS_HELPER
+#endif
+
 #ifdef SIGNATURE_0
 #define DEFAULT_CORE(_vector_size) \
 	.ioend  = RAMSTART - 1, \
@@ -92,7 +117,7 @@
 		.extrf = AVR_IO_REGBIT(MCU_STATUS_REG, EXTRF),\
 		.borf = AVR_IO_REGBIT(MCU_STATUS_REG, BORF),\
 		.wdrf = AVR_IO_REGBIT(MCU_STATUS_REG, WDRF)\
-	}
+	} _SLEEP_FLAGS_HELPER
 #else
 // Disable signature when using an old avr toolchain
 #define DEFAULT_CORE(_vector_size) \

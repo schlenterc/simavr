@@ -954,12 +954,44 @@ static	avr_io_t	_io = {
 	.ioctl = avr_timer_ioctl,
 };
 
+static int
+avr_timer_can_wake(
+		struct avr_t * avr,
+		struct avr_int_vector_t * vector)
+{
+	avr_timer_t * p = (avr_timer_t *)vector->param;
+	if (!p)
+		return 1;
+
+	// In Idle mode (sleep_mode == 0), any timer can wake the CPU.
+	if (avr->sleep_mode == 0)
+		return 1;
+
+	// In deep sleep modes (Power-down, Power-save, Standby, Ext Standby):
+	// Synchronous timers (Timer0, Timer1, or Timer2 without AS2) cannot wake the CPU.
+	// Only Timer2 with AS2 (asynchronous clock) enabled can wake the CPU in Power-save (3) or Ext Standby (7).
+	if (p->as2.reg) {
+		uint8_t as2_val = avr_regbit_get(avr, p->as2);
+		if (as2_val) {
+			if (avr->sleep_mode == 3 || avr->sleep_mode == 7)
+				return 1;
+		}
+	}
+
+	return 0;
+}
+
 void
 avr_timer_init(
 		avr_t * avr,
 		avr_timer_t * p)
 {
 	p->io = _io;
+
+	p->overflow.can_wake = avr_timer_can_wake;
+	p->overflow.param = p;
+	p->icr.can_wake = avr_timer_can_wake;
+	p->icr.param = p;
 
 	avr_register_io(avr, &p->io);
 	avr_register_vector(avr, &p->overflow);
@@ -1020,6 +1052,8 @@ avr_timer_init(
 	 */
 	for (int compi = 0; compi < AVR_TIMER_COMP_COUNT; compi++) {
 		p->comp[compi].timer = p;
+		p->comp[compi].interrupt.can_wake = avr_timer_can_wake;
+		p->comp[compi].interrupt.param = p;
 
 		avr_register_vector(avr, &p->comp[compi].interrupt);
 
